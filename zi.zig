@@ -1,5 +1,5 @@
 // zi.zig - inspired by kilo.c
-// zi = (++(++v))i
+// zi = (v+4)i
 
 const std = @import("std");
 const fmt = std.fmt;
@@ -229,6 +229,13 @@ fn processKeypress(state_p: *State) !bool {
     return false;
 }
 
+fn appendRow(allocator: mem.Allocator, state_p: *State, line: []const u8) !void {
+    var new_line = std.ArrayList(u8).init(allocator);
+    try new_line.appendSlice(line);
+    try state_p.rows.append(new_line);
+    state_p.nrows += 1;
+}
+
 fn openEditor(allocator: mem.Allocator, state_p: *State, path: [:0]const u8) !void {
     var file = try fs.cwd().openFile(path, .{});
     defer file.close();
@@ -238,13 +245,8 @@ fn openEditor(allocator: mem.Allocator, state_p: *State, path: [:0]const u8) !vo
 
     while (try stream.readUntilDelimiterOrEofAlloc(allocator, '\n', 1024)) |line| {
         var end = line.len;
-
         while (end > 0 and (line[end - 1] == '\n' or line[end - 1] == '\r')) end -= 1;
-
-        var new_line = std.ArrayList(u8).init(allocator);
-        try new_line.appendSlice(line[0..end]);
-        try state_p.rows.append(new_line);
-        state_p.nrows += 1;
+        try appendRow(allocator, state_p, line[0..end]);
     }
 }
 
@@ -274,7 +276,7 @@ fn drawRows(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
         const file_row = y + state_p.offset.y;
         if (file_row >= state_p.nrows) {
             if (state_p.nrows == 0 and y == dims.y / 3) {
-                const welcome = "zi = (++(++v))i -- version " ++ kilo_version;
+                const welcome = "zi = (v+4)i -- version " ++ kilo_version;
                 const len = @min(welcome.len, dims.x);
 
                 // center welcome message
@@ -293,6 +295,8 @@ fn drawRows(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
             const offset: usize = @intCast(state_p.offset.x);
             const scols: usize = @intCast(state_p.dims.x);
             const len = if (line.len < offset) 0 else if (line.len - offset > scols) scols else line.len - offset;
+
+            // append row
             if (len != 0) try append_buffer.appendSlice(line[offset .. offset + len]);
         }
 
