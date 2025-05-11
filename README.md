@@ -1,4 +1,4 @@
-# zi: zisual editor
+# zi = (v++++)i
 
 A single-file terminal text editor inspired by kilo.c.
 
