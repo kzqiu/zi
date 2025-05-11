@@ -1,5 +1,5 @@
 // zi.zig - inspired by kilo.c
-// zi = (v++++)i
+// zi = (++(++v))i
 
 const std = @import("std");
 const fmt = std.fmt;
@@ -274,7 +274,7 @@ fn drawRows(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
         const file_row = y + state_p.offset.y;
         if (file_row >= state_p.nrows) {
             if (state_p.nrows == 0 and y == dims.y / 3) {
-                const welcome = "zi = (v++++)i -- version " ++ kilo_version;
+                const welcome = "zi = (++(++v))i -- version " ++ kilo_version;
                 const len = @min(welcome.len, dims.x);
 
                 // center welcome message

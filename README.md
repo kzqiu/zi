@@ -1,4 +1,4 @@
-# zi = (v++++)i
+# zi = (++(++v))i
 
 A single-file terminal text editor inspired by kilo.c.
 
