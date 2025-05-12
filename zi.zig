@@ -12,6 +12,7 @@ const posix = std.posix;
 
 // editor constants
 const kilo_version = "0.0.1";
+const tab_stop = 8;
 
 const Key = enum(u16) {
     left = 1000,
@@ -39,23 +40,32 @@ const Pos = struct {
     y: u16 = 0,
 };
 
+const Row = struct {
+    chars: std.ArrayList(u8),
+    render: std.ArrayList(u8),
+};
+
 const State = struct {
     cpos: Pos = .{},
-    dims: Pos,
+    dims: Pos = .{},
     offset: Pos = .{},
     nrows: u32 = 0,
-    rows: std.ArrayList(std.ArrayList(u8)),
+    rows: std.ArrayList(Row),
+    rx: u16 = 0,
     // mode: Mode = .normal,
 
     fn init(allocator: mem.Allocator) !State {
         return State{
             .dims = try getWindowSize(),
-            .rows = std.ArrayList(std.ArrayList(u8)).init(allocator),
+            .rows = std.ArrayList(Row).init(allocator),
         };
     }
 
-    fn deinit(self: *State) void {
-        for (self.rows.items) |row| row.deinit();
+    fn deinit(self: State) void {
+        for (self.rows.items) |row| {
+            row.chars.deinit();
+            row.render.deinit();
+        }
         self.rows.deinit();
     }
 };
@@ -159,7 +169,7 @@ fn moveCursor(state_p: *State, k: Key) void {
     var row_len: ?usize = if (state_p.cpos.y >= state_p.nrows)
         null
     else
-        state_p.rows.items[state_p.cpos.y].items.len;
+        state_p.rows.items[state_p.cpos.y].chars.items.len;
 
     switch (k) {
         .left => {
@@ -167,7 +177,7 @@ fn moveCursor(state_p: *State, k: Key) void {
                 state_p.cpos.x -= 1;
             } else if (state_p.cpos.y > 0) {
                 state_p.cpos.y -= 1;
-                state_p.cpos.x = @intCast(state_p.rows.items[state_p.cpos.y].items.len);
+                state_p.cpos.x = @intCast(state_p.rows.items[state_p.cpos.y].chars.items.len);
             }
         },
         .right => {
@@ -191,7 +201,7 @@ fn moveCursor(state_p: *State, k: Key) void {
     row_len = if (state_p.cpos.y >= state_p.nrows)
         null
     else
-        state_p.rows.items[state_p.cpos.y].items.len;
+        state_p.rows.items[state_p.cpos.y].chars.items.len;
 
     const new_row_len: u16 = if (row_len == null) 0 else @intCast(row_len.?);
 
@@ -229,10 +239,51 @@ fn processKeypress(state_p: *State) !bool {
     return false;
 }
 
+fn rowCurXtoRX(row_p: *Row, cx: u16) u16 {
+    var rx: u16 = 0;
+    var i: usize = 0;
+
+    while (i < cx) : (i += 1) {
+        if (row_p.chars.items[i] == '\t')
+            rx += tab_stop - 1 - rx % tab_stop;
+        rx += 1;
+    }
+
+    return rx;
+}
+
+fn renderRow(allocator: mem.Allocator, row_p: *Row) !void {
+    var new_render = std.ArrayList(u8).init(allocator);
+    const chars = row_p.chars.items;
+    var char_idx: usize = 0;
+    var render_idx: usize = 0;
+
+    while (char_idx < chars.len) : (char_idx += 1) {
+        if (chars[char_idx] == '\t') {
+            try new_render.append(' ');
+            render_idx += 1;
+            while (render_idx % tab_stop != 0) : (render_idx += 1) {
+                try new_render.append(' ');
+            }
+        } else {
+            try new_render.append(chars[char_idx]);
+            render_idx += 1;
+        }
+    }
+
+    row_p.render = new_render;
+}
+
 fn appendRow(allocator: mem.Allocator, state_p: *State, line: []const u8) !void {
     var new_line = std.ArrayList(u8).init(allocator);
     try new_line.appendSlice(line);
-    try state_p.rows.append(new_line);
+
+    // TODO: make render an optional and initialize as null
+    var new_row = Row{ .chars = new_line, .render = undefined };
+    try renderRow(allocator, &new_row);
+
+    try state_p.rows.append(new_row);
+
     state_p.nrows += 1;
 }
 
@@ -244,15 +295,19 @@ fn openEditor(allocator: mem.Allocator, state_p: *State, path: [:0]const u8) !vo
     var stream = reader.reader();
 
     while (try stream.readUntilDelimiterOrEofAlloc(allocator, '\n', 1024)) |line| {
-        var end = line.len;
-        while (end > 0 and (line[end - 1] == '\n' or line[end - 1] == '\r')) end -= 1;
-        try appendRow(allocator, state_p, line[0..end]);
+        try appendRow(allocator, state_p, mem.trim(u8, line, "\r\n"));
     }
 }
 
 fn scrollEditor(state_p: *State) void {
-    const x = state_p.cpos.x;
     const y = state_p.cpos.y;
+
+    state_p.rx = 0;
+
+    if (y < state_p.nrows)
+        state_p.rx = rowCurXtoRX(&state_p.rows.items[y], state_p.cpos.x);
+
+    const x = state_p.rx;
 
     if (y < state_p.offset.y)
         state_p.offset.y = y;
@@ -291,7 +346,8 @@ fn drawRows(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
                 try append_buffer.appendSlice(welcome[0..len]);
             } else try append_buffer.append('~');
         } else {
-            const line = state_p.rows.items[file_row].items;
+            const line = state_p.rows.items[file_row].render.items;
+
             const offset: usize = @intCast(state_p.offset.x);
             const scols: usize = @intCast(state_p.dims.x);
             const len = if (line.len < offset) 0 else if (line.len - offset > scols) scols else line.len - offset;
@@ -320,7 +376,7 @@ fn refreshScreen(allocator: mem.Allocator, state_p: *State) !void {
     var buf: [32]u8 = undefined;
     const cursor_pos = try fmt.bufPrint(&buf, "\x1b[{d};{d}H", .{
         state_p.cpos.y - state_p.offset.y + 1,
-        state_p.cpos.x - state_p.offset.x + 1,
+        state_p.rx - state_p.offset.x + 1,
     });
 
     try append_buffer.appendSlice(cursor_pos);
