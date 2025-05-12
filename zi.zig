@@ -25,15 +25,17 @@ const Key = enum(u16) {
     end,
     page_up,
     page_down,
+    to_normal,
+    to_insert,
     _, // non-exhaustive for other characters
 };
 
-// TODO: implement modes
-// const Mode = enum {
-//     normal,
-//     insert,
-//     visual,
-// };
+const Mode = enum {
+    normal,
+    insert,
+    // command, // TODO: implement
+    // visual, // TODO: implement
+};
 
 // struct definitions
 const Pos = struct {
@@ -57,7 +59,7 @@ const State = struct {
     status: [80]u8 = undefined,
     status_len: u32 = 0,
     status_time: i64 = 0,
-    // mode: Mode = .normal,
+    mode: Mode = .normal,
 
     fn init(allocator: mem.Allocator) !State {
         var dims = try getWindowSize();
@@ -121,23 +123,24 @@ fn disableRawMode(original: linux.termios) void {
 }
 
 // input functions
-fn readKey() !Key {
+// get a character from the system and process them to be useable
+// modes are not handled here
+fn readKey(state_p: *State) !Key {
     const stdin = io.getStdIn().reader();
     var buffer: [1]u8 = undefined;
     _ = try stdin.read(&buffer);
 
-    // TODO: add modes, escape sequences introduce lag
     // handle escape sequences
     if (buffer[0] == '\x1b') {
         var seq: [3]u8 = undefined;
 
-        if (try stdin.read(seq[0..1]) != 1) return @enumFromInt('\x1b');
-        if (try stdin.read(seq[1..2]) != 1) return @enumFromInt('\x1b');
+        if (try stdin.read(seq[0..1]) != 1) return .to_normal;
+        if (try stdin.read(seq[1..2]) != 1) return .to_normal;
 
         if (seq[0] == '[') {
             if (seq[1] >= '0' and seq[1] <= '9') { // page up/down
                 const l3 = try stdin.read(seq[2..3]);
-                if (l3 != 1) return @enumFromInt('\x1b');
+                if (l3 != 1) return .to_normal;
 
                 if (seq[2] == '~') {
                     switch (seq[1]) {
@@ -168,7 +171,19 @@ fn readKey() !Key {
             }
         }
 
-        return @enumFromInt('\x1b');
+        return .to_normal;
+    }
+
+    // TODO: handle movement in visual mode
+    if (state_p.mode == Mode.normal) {
+        switch (buffer[0]) {
+            'h' => return .left,
+            'j' => return .down,
+            'k' => return .up,
+            'l' => return .right,
+            'i' => return .to_insert,
+            else => {},
+        }
     }
 
     return @enumFromInt(buffer[0]);
@@ -203,8 +218,7 @@ fn moveCursor(state_p: *State, k: Key) void {
         .up => {
             if (state_p.cpos.y != 0) state_p.cpos.y -= 1;
         },
-        .page_up, .page_down, .home, .end, .del => unreachable,
-        _ => unreachable,
+        else => unreachable,
     }
 
     row_len = if (state_p.cpos.y >= state_p.nrows)
@@ -217,8 +231,9 @@ fn moveCursor(state_p: *State, k: Key) void {
     if (state_p.cpos.x > new_row_len) state_p.cpos.x = new_row_len;
 }
 
+// get keypresses and execute actions
 fn processKeypress(state_p: *State) !bool {
-    const k = try readKey();
+    const k = try readKey(state_p);
 
     switch (k) {
         .left, .right, .up, .down => moveCursor(state_p, k),
@@ -240,9 +255,10 @@ fn processKeypress(state_p: *State) !bool {
             while (count > 0) : (count -= 1) moveCursor(state_p, dir);
         },
         .del => {},
+        .to_normal => state_p.mode = Mode.normal,
+        .to_insert => state_p.mode = Mode.insert,
         _ => {
             const c = @intFromEnum(k);
-
             switch (c) {
                 // TODO: change this once we have commands
                 'q' & 0x1f => { // ctrl + q
@@ -381,24 +397,35 @@ fn drawRows(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
 }
 
 fn drawStatus(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
-    try append_buffer.appendSlice("\x1b[7m");
+    try append_buffer.appendSlice("\x1b[7m ");
+    try append_buffer.appendSlice(@tagName(state_p.mode));
+    try append_buffer.append(' ');
 
     var status: [80]u8 = undefined;
     var rstatus: [80]u8 = undefined;
 
     const name = if (state_p.filename.items.len == 0) "[No Name]" else state_p.filename.items;
-    const s = try fmt.bufPrint(&status, "{s} - {d} lines", .{ name, state_p.nrows });
-    const rs = try fmt.bufPrint(&rstatus, "{d}/{d}", .{ state_p.cpos.y + 1, state_p.nrows });
-    var len: usize = s.len;
-    const rlen: usize = rs.len;
+    const name_s = try fmt.bufPrint(&status, "{s}", .{name});
+    const row_s = try fmt.bufPrint(&rstatus, "{d}/{d} ", .{ state_p.cpos.y + 1, state_p.nrows });
 
-    if (len > state_p.dims.x) len = @intCast(state_p.dims.x);
+    const mode_len: usize = 8;
+    var name_len: usize = name_s.len;
+    const row_len: usize = row_s.len;
+    var i: usize = mode_len; // mode takes up 8 chars (6 + 2 padding)
 
-    try append_buffer.appendSlice(s[0..len]);
+    if (name_len > state_p.dims.x - mode_len - row_len) name_len = @intCast(state_p.dims.x - mode_len - row_len);
 
-    while (len < state_p.dims.x) : (len += 1) {
-        if (state_p.dims.x - len == rlen) {
-            try append_buffer.appendSlice(rs);
+    // add padding before title
+    while (i < (state_p.dims.x - name_len) / 2) : (i += 1) try append_buffer.append(' ');
+
+    try append_buffer.appendSlice(name_s[0..name_len]);
+
+    i += name_len;
+
+    // print end of line (line numbers)
+    while (i < state_p.dims.x) : (i += 1) {
+        if (state_p.dims.x - i == row_len) {
+            try append_buffer.appendSlice(row_s);
             break;
         }
         try append_buffer.append(' ');
