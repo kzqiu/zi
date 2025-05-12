@@ -7,6 +7,7 @@ const fs = std.fs;
 const io = std.io;
 const mem = std.mem;
 const os = std.os;
+const time = std.time;
 const linux = std.os.linux;
 const posix = std.posix;
 
@@ -52,12 +53,19 @@ const State = struct {
     nrows: u32 = 0,
     rows: std.ArrayList(Row),
     rx: u32 = 0,
+    filename: std.ArrayList(u8),
+    status: [80]u8 = undefined,
+    status_len: u32 = 0,
+    status_time: i64 = 0,
     // mode: Mode = .normal,
 
     fn init(allocator: mem.Allocator) !State {
+        var dims = try getWindowSize();
+        dims.y -= 2;
         return State{
-            .dims = try getWindowSize(),
+            .dims = dims,
             .rows = std.ArrayList(Row).init(allocator),
+            .filename = std.ArrayList(u8).init(allocator),
         };
     }
 
@@ -67,6 +75,7 @@ const State = struct {
             row.render.deinit();
         }
         self.rows.deinit();
+        self.filename.deinit();
     }
 };
 
@@ -299,6 +308,7 @@ fn appendRow(allocator: mem.Allocator, state_p: *State, line: []const u8) !void 
 fn openEditor(allocator: mem.Allocator, state_p: *State, path: [:0]const u8) !void {
     var file = try fs.cwd().openFile(path, .{});
     defer file.close();
+    try state_p.filename.appendSlice(path);
 
     var reader = std.io.bufferedReader(file.reader());
     var stream = reader.reader();
@@ -366,9 +376,43 @@ fn drawRows(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
         }
 
         // erase to the right of cursor on current row (default arg: 0)
-        try append_buffer.appendSlice("\x1b[K");
-        if (y < dims.y - 1) try append_buffer.appendSlice("\r\n");
+        try append_buffer.appendSlice("\x1b[K\r\n");
     }
+}
+
+fn drawStatus(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
+    try append_buffer.appendSlice("\x1b[7m");
+
+    var status: [80]u8 = undefined;
+    var rstatus: [80]u8 = undefined;
+
+    const name = if (state_p.filename.items.len == 0) "[No Name]" else state_p.filename.items;
+    const s = try fmt.bufPrint(&status, "{s} - {d} lines", .{ name, state_p.nrows });
+    const rs = try fmt.bufPrint(&rstatus, "{d}/{d}", .{ state_p.cpos.y + 1, state_p.nrows });
+    var len: usize = s.len;
+    const rlen: usize = rs.len;
+
+    if (len > state_p.dims.x) len = @intCast(state_p.dims.x);
+
+    try append_buffer.appendSlice(s[0..len]);
+
+    while (len < state_p.dims.x) : (len += 1) {
+        if (state_p.dims.x - len == rlen) {
+            try append_buffer.appendSlice(rs);
+            break;
+        }
+        try append_buffer.append(' ');
+    }
+
+    try append_buffer.appendSlice("\x1b[m\r\n");
+}
+
+fn drawMsgBar(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
+    try append_buffer.appendSlice("\x1b[K");
+    var len = state_p.status_len;
+    if (len > state_p.dims.x) len = state_p.dims.x;
+    if (len != 0 and time.milliTimestamp() - state_p.status_time < 5000)
+        try append_buffer.appendSlice(state_p.status[0..len]);
 }
 
 fn refreshScreen(allocator: mem.Allocator, state_p: *State) !void {
@@ -381,6 +425,8 @@ fn refreshScreen(allocator: mem.Allocator, state_p: *State) !void {
     try append_buffer.appendSlice("\x1b[?25l\x1b[H");
 
     try drawRows(state_p, &append_buffer);
+    try drawStatus(state_p, &append_buffer);
+    try drawMsgBar(state_p, &append_buffer);
 
     var buf: [32]u8 = undefined;
     const cursor_pos = try fmt.bufPrint(&buf, "\x1b[{d};{d}H", .{
@@ -394,6 +440,12 @@ fn refreshScreen(allocator: mem.Allocator, state_p: *State) !void {
     try append_buffer.appendSlice("\x1b[?25h");
 
     _ = try io.getStdOut().write(append_buffer.items);
+}
+
+fn setStatusMsg(state_p: *State, comptime format: []const u8, args: anytype) !void {
+    const s = try fmt.bufPrint(&state_p.status, format, args);
+    state_p.status_len = @intCast(s.len);
+    state_p.status_time = time.milliTimestamp();
 }
 
 fn getCursorPos() !Pos {
@@ -450,6 +502,8 @@ pub fn main() !void {
         const path: [:0]const u8 = mem.span(os.argv[1]);
         try openEditor(allocator, &state, path);
     }
+
+    try setStatusMsg(&state, "HELP: Ctrl-Q = quit", .{});
 
     while (true) {
         try refreshScreen(allocator, &state);
