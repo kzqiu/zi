@@ -36,8 +36,8 @@ const Key = enum(u16) {
 
 // struct definitions
 const Pos = struct {
-    x: u16 = 0,
-    y: u16 = 0,
+    x: u32 = 0,
+    y: u32 = 0,
 };
 
 const Row = struct {
@@ -51,7 +51,7 @@ const State = struct {
     offset: Pos = .{},
     nrows: u32 = 0,
     rows: std.ArrayList(Row),
-    rx: u16 = 0,
+    rx: u32 = 0,
     // mode: Mode = .normal,
 
     fn init(allocator: mem.Allocator) !State {
@@ -203,7 +203,7 @@ fn moveCursor(state_p: *State, k: Key) void {
     else
         state_p.rows.items[state_p.cpos.y].chars.items.len;
 
-    const new_row_len: u16 = if (row_len == null) 0 else @intCast(row_len.?);
+    const new_row_len: u32 = if (row_len == null) 0 else @intCast(row_len.?);
 
     if (state_p.cpos.x > new_row_len) state_p.cpos.x = new_row_len;
 }
@@ -214,8 +214,17 @@ fn processKeypress(state_p: *State) !bool {
     switch (k) {
         .left, .right, .up, .down => moveCursor(state_p, k),
         .home => state_p.cpos.x = 0,
-        .end => state_p.cpos.x = state_p.dims.x - 1,
+        .end => if (state_p.cpos.y < state_p.nrows) {
+            state_p.cpos.x = @intCast(state_p.rows.items[state_p.cpos.y].chars.items.len);
+        },
         .page_up, .page_down => {
+            if (k == .page_up) {
+                state_p.cpos.y = state_p.offset.y;
+            } else {
+                state_p.cpos.y = state_p.offset.y + state_p.dims.y - 1;
+                if (state_p.cpos.y > state_p.nrows) state_p.cpos.y = state_p.nrows;
+            }
+
             var count = state_p.dims.y;
             var dir = Key.down;
             if (k == Key.page_up) dir = Key.up;
@@ -239,8 +248,8 @@ fn processKeypress(state_p: *State) !bool {
     return false;
 }
 
-fn rowCurXtoRX(row_p: *Row, cx: u16) u16 {
-    var rx: u16 = 0;
+fn rowCurXtoRX(row_p: *Row, cx: u32) u32 {
+    var rx: u32 = 0;
     var i: usize = 0;
 
     while (i < cx) : (i += 1) {
@@ -325,7 +334,7 @@ fn scrollEditor(state_p: *State) void {
 // output functions
 fn drawRows(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
     const dims = state_p.dims;
-    var y: u16 = 0;
+    var y: u32 = 0;
 
     while (y < dims.y) : (y += 1) {
         const file_row = y + state_p.offset.y;
@@ -335,13 +344,13 @@ fn drawRows(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
                 const len = @min(welcome.len, dims.x);
 
                 // center welcome message
-                var padding: u16 = (dims.x - len) / 2;
+                var padding: u32 = (dims.x - len) / 2;
                 if (padding != 0) {
                     try append_buffer.append('~');
                     padding -= 1;
                 }
 
-                var i: u16 = 0;
+                var i: u32 = 0;
                 while (i < padding) : (i += 1) try append_buffer.append(' ');
                 try append_buffer.appendSlice(welcome[0..len]);
             } else try append_buffer.append('~');
@@ -407,8 +416,8 @@ fn getCursorPos() !Pos {
     var it = mem.tokenizeAny(u8, buffer[2..i], ";R");
 
     return .{
-        .x = try fmt.parseInt(u16, it.next().?, 10),
-        .y = try fmt.parseInt(u16, it.next().?, 10),
+        .x = try fmt.parseInt(u32, it.next().?, 10),
+        .y = try fmt.parseInt(u32, it.next().?, 10),
     };
 }
 
