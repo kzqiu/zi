@@ -43,7 +43,7 @@ const Pos = struct {
 
 const Row = struct {
     chars: std.ArrayList(u8),
-    render: std.ArrayList(u8),
+    render: ?std.ArrayList(u8) = null,
 };
 
 const State = struct {
@@ -74,7 +74,7 @@ const State = struct {
     fn deinit(self: State) void {
         for (self.rows.items) |row| {
             row.chars.deinit();
-            row.render.deinit();
+            if (row.render) |render| render.deinit();
         }
         self.rows.deinit();
         self.filename.deinit();
@@ -305,6 +305,8 @@ fn rowCurXtoRX(row_p: *Row, cx: u32) u32 {
 
 /// Modify row in place and render wide chars from raw lines.
 fn renderRow(allocator: mem.Allocator, row_p: *Row) !void {
+    if (row_p.render) |render| render.deinit();
+
     var new_render = std.ArrayList(u8).init(allocator);
     const chars = row_p.chars.items;
     var char_idx: usize = 0;
@@ -332,10 +334,11 @@ fn renderRow(allocator: mem.Allocator, row_p: *Row) !void {
 /// Append a row to end of file buffer.
 fn appendRow(allocator: mem.Allocator, state_p: *State, line: []const u8) !void {
     var new_line = std.ArrayList(u8).init(allocator);
+
     try new_line.appendSlice(line);
 
-    // TODO: make render an optional and initialize as null
-    var new_row = Row{ .chars = new_line, .render = undefined };
+    var new_row = Row{ .chars = new_line, .render = null };
+
     try renderRow(allocator, &new_row);
     try state_p.rows.append(new_row);
 
@@ -412,7 +415,7 @@ fn drawRows(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
             }
         } else {
             // row to render
-            const line = state_p.rows.items[file_row].render.items;
+            const line = state_p.rows.items[file_row].render.?.items;
             const offset: usize = @intCast(state_p.offset.x);
             const scols: usize = @intCast(state_p.dims.x);
 
@@ -434,7 +437,7 @@ fn drawRows(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
 
 /// Draw status bar.
 fn drawStatus(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
-    // ([7m) invert colors and draw mode with padding on both sides
+    // (7m) invert colors and draw mode with padding on both sides
     try append_buffer.appendSlice("\x1b[7m ");
     try append_buffer.appendSlice(@tagName(state_p.mode));
     try append_buffer.append(' ');
