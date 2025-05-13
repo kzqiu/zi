@@ -15,6 +15,7 @@ const kilo_version = "0.0.1";
 const tab_stop = 8;
 
 const Key = enum(u16) {
+    backspace = 127,
     left = 1000,
     down,
     up,
@@ -109,6 +110,7 @@ fn enableRawMode() !linux.termios {
     };
     raw.oflag = .{ .OPOST = false };
 
+    // wait for at most 0.1 seconds
     raw.cc[@intFromEnum(linux.V.MIN)] = 0;
     raw.cc[@intFromEnum(linux.V.TIME)] = 1;
 
@@ -127,7 +129,7 @@ fn disableRawMode(original: linux.termios) void {
 fn readKey(state_p: *State) !Key {
     const stdin = io.getStdIn().reader();
     var buffer: [1]u8 = undefined;
-    _ = try stdin.read(&buffer);
+    if (try stdin.read(&buffer) == 0) return @enumFromInt('\x00'); // no-op
 
     // handle escape sequences
     if (buffer[0] == '\x1b') {
@@ -249,7 +251,7 @@ fn changeMode(state_p: *State, mode_k: Key) !void {
 }
 
 /// Execute instruction from input.
-fn processKeypress(state_p: *State) !bool {
+fn processKeypress(allocator: mem.Allocator, state_p: *State) !bool {
     const k = try readKey(state_p);
 
     switch (k) {
@@ -271,9 +273,14 @@ fn processKeypress(state_p: *State) !bool {
             if (k == Key.page_up) dir = Key.up;
             while (count > 0) : (count -= 1) moveCursor(state_p, dir);
         },
-        .del => {},
+        .del, .backspace => {
+            // TODO: implement
+        },
         .to_normal, .to_insert => try changeMode(state_p, k),
-        _ => { // non-enum elements are handled directly as u16 values
+        _ => {
+            // non-enum elements are handled directly as u16 values
+            // we only want to handle u8 values here though
+            // ensure that special keys are handled above!
             const c = @intFromEnum(k);
             switch (c) {
                 // TODO: change this once we have commands
@@ -281,7 +288,14 @@ fn processKeypress(state_p: *State) !bool {
                     _ = try io.getStdOut().write("\x1b[2J\x1b[H");
                     return true;
                 },
-                else => {},
+                'h' & 0x1f, 'l' & 0x1f, '\r' => {
+                    // TODO: implement
+                },
+                '\x00' => {}, // no-op
+                else => if (state_p.mode == Mode.insert) {
+                    const char: u8 = @intCast(c);
+                    try insertChar(allocator, state_p, char);
+                },
             }
         },
     }
@@ -333,24 +347,40 @@ fn renderRow(allocator: mem.Allocator, row_p: *Row) !void {
 
 /// Append a row to end of file buffer.
 fn appendRow(allocator: mem.Allocator, state_p: *State, line: []const u8) !void {
-    var new_line = std.ArrayList(u8).init(allocator);
+    var new_row = Row{
+        .chars = std.ArrayList(u8).init(allocator),
+        .render = null,
+    };
 
-    try new_line.appendSlice(line);
-
-    var new_row = Row{ .chars = new_line, .render = null };
-
+    try new_row.chars.appendSlice(line);
     try renderRow(allocator, &new_row);
     try state_p.rows.append(new_row);
 
     state_p.nrows += 1;
 }
 
+/// Insert character into a row at idx.
+fn rowInsertChar(allocator: mem.Allocator, row_p: *Row, idx: usize, char: u8) !void {
+    const at = if (idx < 0 or idx > row_p.chars.items.len) row_p.chars.items.len else idx;
+    try row_p.chars.insert(at, char);
+    try renderRow(allocator, row_p);
+}
+
+/// Insert character.
+fn insertChar(allocator: mem.Allocator, state_p: *State, char: u8) !void {
+    // TODO: current behavior when inserting at end is to continue trying to insert char
+    // may want to have user create new line and then start inserting as separate chars
+    if (state_p.cpos.y == state_p.nrows) try appendRow(allocator, state_p, "");
+    try rowInsertChar(allocator, &state_p.rows.items[state_p.cpos.y], state_p.cpos.x, char);
+    state_p.cpos.x += 1;
+}
+
 /// Open editor and load lines from provided file.
 fn openEditor(allocator: mem.Allocator, state_p: *State, path: [:0]const u8) !void {
     var file = try fs.cwd().openFile(path, .{});
     defer file.close();
-    try state_p.filename.appendSlice(path);
 
+    try state_p.filename.appendSlice(path);
     var reader = std.io.bufferedReader(file.reader());
     var stream = reader.reader();
 
@@ -523,6 +553,10 @@ fn refreshScreen(allocator: mem.Allocator, state_p: *State) !void {
 
     try append_buffer.appendSlice(cursor_pos);
 
+    const cursor_style = if (state_p.mode == Mode.insert) "\x1b[6 q" else "\x1b[2 q";
+
+    try append_buffer.appendSlice(cursor_style);
+
     // (?25h) hide cursor
     try append_buffer.appendSlice("\x1b[?25h");
 
@@ -605,7 +639,7 @@ pub fn main() !void {
     // render/action loop
     while (true) {
         try refreshScreen(allocator, &state);
-        const done = try processKeypress(&state);
+        const done = try processKeypress(allocator, &state);
         if (done) break;
     }
 }
