@@ -11,12 +11,16 @@ const time = std.time;
 const linux = std.os.linux;
 const posix = std.posix;
 
+/// Editor Constants.
 const kilo_version = "0.0.1";
 const tab_stop = 8;
 
+/// Global IO descriptors.
 const stdout = io.getStdOut();
 const stdin = io.getStdIn();
 
+/// Key values (primarily actions).
+/// Non-exhaustive so additional keys must be handled in _ branch.
 const Key = enum(u16) {
     backspace = 127,
     left = 1000,
@@ -64,13 +68,13 @@ const State = struct {
     mode: Mode = .normal,
 
     /// Set up state by getting window dims and initing text buffers.
-    fn init(allocator: mem.Allocator) !State {
+    fn init(alloc: mem.Allocator) !State {
         var dims = try getWindowSize();
         dims.y -= 2;
         return State{
             .dims = dims,
-            .rows = std.ArrayList(Row).init(allocator),
-            .filename = std.ArrayList(u8).init(allocator),
+            .rows = std.ArrayList(Row).init(alloc),
+            .filename = std.ArrayList(u8).init(alloc),
         };
     }
 
@@ -251,7 +255,7 @@ fn changeMode(state_p: *State, mode_k: Key) !void {
 }
 
 /// Execute instruction from input.
-fn processKeypress(allocator: mem.Allocator, state_p: *State) !bool {
+fn processKeypress(alloc: mem.Allocator, state_p: *State) !bool {
     const k = try readKey(state_p);
 
     switch (k) {
@@ -294,7 +298,7 @@ fn processKeypress(allocator: mem.Allocator, state_p: *State) !bool {
                 '\x00' => {}, // no-op
                 else => if (state_p.mode == Mode.insert) {
                     const char: u8 = @intCast(c);
-                    try insertChar(allocator, state_p, char);
+                    try insertChar(alloc, state_p, char);
                 },
             }
         },
@@ -318,10 +322,10 @@ fn rowCurXtoRX(row_p: *Row, cx: u32) u32 {
 }
 
 /// Modify row in place and render wide chars from raw lines.
-fn renderRow(allocator: mem.Allocator, row_p: *Row) !void {
+fn renderRow(alloc: mem.Allocator, row_p: *Row) !void {
     if (row_p.render) |render| render.deinit();
 
-    var new_render = std.ArrayList(u8).init(allocator);
+    var new_render = std.ArrayList(u8).init(alloc);
     const chars = row_p.chars.items;
     var char_idx: usize = 0;
     var render_idx: usize = 0;
@@ -346,40 +350,44 @@ fn renderRow(allocator: mem.Allocator, row_p: *Row) !void {
 }
 
 /// Append a row to end of file buffer.
-fn appendRow(allocator: mem.Allocator, state_p: *State, line: []const u8) !void {
+fn appendRow(alloc: mem.Allocator, state_p: *State, line: []const u8) !void {
     var new_row = Row{
-        .chars = std.ArrayList(u8).init(allocator),
+        .chars = std.ArrayList(u8).init(alloc),
         .render = null,
     };
 
     try new_row.chars.appendSlice(line);
-    try renderRow(allocator, &new_row);
+    try renderRow(alloc, &new_row);
     try state_p.rows.append(new_row);
 
     state_p.nrows += 1;
 }
 
 /// Insert character into a row at idx.
-fn rowInsertChar(allocator: mem.Allocator, row_p: *Row, idx: usize, char: u8) !void {
+fn rowInsertChar(alloc: mem.Allocator, row_p: *Row, idx: usize, char: u8) !void {
     const at = if (idx < 0 or idx > row_p.chars.items.len) row_p.chars.items.len else idx;
     try row_p.chars.insert(at, char);
-    try renderRow(allocator, row_p);
+    try renderRow(alloc, row_p);
 }
 
 /// Insert character.
-fn insertChar(allocator: mem.Allocator, state_p: *State, char: u8) !void {
+fn insertChar(alloc: mem.Allocator, state_p: *State, char: u8) !void {
     // TODO: current behavior when inserting at end is to continue trying to insert char
     // may want to have user create new line and then start inserting as separate chars
-    if (state_p.cpos.y == state_p.nrows) try appendRow(allocator, state_p, "");
-    try rowInsertChar(allocator, &state_p.rows.items[state_p.cpos.y], state_p.cpos.x, char);
+    if (state_p.cpos.y == state_p.nrows) try appendRow(alloc, state_p, "");
+    try rowInsertChar(alloc, &state_p.rows.items[state_p.cpos.y], state_p.cpos.x, char);
     state_p.cpos.x += 1;
 }
 
 /// Convert rows to a single string.
-// fn rowsToString() !void {}
+// fn rowsToString(state_p: *State) !void {
+//     var total_len: usize = 0;
+
+//     for (state_p.rows.items) |r| total_len += r.chars.len;
+// }
 
 /// Open editor and load lines from provided file.
-fn openEditor(allocator: mem.Allocator, state_p: *State, path: [:0]const u8) !void {
+fn openEditor(alloc: mem.Allocator, state_p: *State, path: [:0]const u8) !void {
     var file = try fs.cwd().openFile(path, .{});
     defer file.close();
 
@@ -387,8 +395,8 @@ fn openEditor(allocator: mem.Allocator, state_p: *State, path: [:0]const u8) !vo
     var reader = std.io.bufferedReader(file.reader());
     var stream = reader.reader();
 
-    while (try stream.readUntilDelimiterOrEofAlloc(allocator, '\n', 1024)) |line| {
-        try appendRow(allocator, state_p, mem.trim(u8, line, "\r\n"));
+    while (try stream.readUntilDelimiterOrEofAlloc(alloc, '\n', 1024)) |line| {
+        try appendRow(alloc, state_p, mem.trim(u8, line, "\r\n"));
     }
 }
 
@@ -534,10 +542,10 @@ fn drawMsgBar(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
 
 /// Refresh screen and draw all regions.
 /// Allocates new append buffer each time.
-fn refreshScreen(allocator: mem.Allocator, state_p: *State) !void {
+fn refreshScreen(alloc: mem.Allocator, state_p: *State) !void {
     scrollEditor(state_p);
 
-    var append_buffer = std.ArrayList(u8).init(allocator);
+    var append_buffer = std.ArrayList(u8).init(alloc);
     defer append_buffer.deinit();
 
     // (?25l) show cursor, (H) move cursor to top left
@@ -616,21 +624,21 @@ fn getWindowSize() !Pos {
 /// Entry point to program.
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
+    const alloc = gpa.allocator();
 
     // set up tui by changing terminal to raw mode
     const original = try enableRawMode();
     defer disableRawMode(original);
 
     // set up editor state (file buffers)
-    var state = try State.init(allocator);
+    var state = try State.init(alloc);
     defer state.deinit();
 
     // use only the first file
     if (os.argv.len >= 2) {
         // convert from sentinel terminated string to slice
         const path: [:0]const u8 = mem.span(os.argv[1]);
-        try openEditor(allocator, &state, path);
+        try openEditor(alloc, &state, path);
     }
 
     // initial message
@@ -638,8 +646,8 @@ pub fn main() !void {
 
     // render/action loop
     while (true) {
-        try refreshScreen(allocator, &state);
-        const done = try processKeypress(allocator, &state);
+        try refreshScreen(alloc, &state);
+        const done = try processKeypress(alloc, &state);
         if (done) break;
     }
 }
