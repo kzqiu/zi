@@ -14,6 +14,9 @@ const posix = std.posix;
 const kilo_version = "0.0.1";
 const tab_stop = 8;
 
+const stdout = io.getStdOut();
+const stdin = io.getStdIn();
+
 const Key = enum(u16) {
     backspace = 127,
     left = 1000,
@@ -85,9 +88,8 @@ const State = struct {
 /// Switch terminal to raw mode and return original termios.
 fn enableRawMode() !linux.termios {
     var original: linux.termios = undefined;
-    const stdin_handle = io.getStdIn().handle;
 
-    if (linux.tcgetattr(stdin_handle, &original) != 0)
+    if (linux.tcgetattr(stdin.handle, &original) != 0)
         return error.TCGetAttr;
 
     // TODO: add comments about raw mode flags
@@ -114,7 +116,7 @@ fn enableRawMode() !linux.termios {
     raw.cc[@intFromEnum(linux.V.MIN)] = 0;
     raw.cc[@intFromEnum(linux.V.TIME)] = 1;
 
-    if (linux.tcsetattr(stdin_handle, .FLUSH, &raw) != 0)
+    if (linux.tcsetattr(stdin.handle, .FLUSH, &raw) != 0)
         return error.TCSetAttr;
 
     return original;
@@ -122,12 +124,11 @@ fn enableRawMode() !linux.termios {
 
 /// Switch terminal back to original termios.
 fn disableRawMode(original: linux.termios) void {
-    _ = linux.tcsetattr(io.getStdIn().handle, .FLUSH, &original);
+    _ = linux.tcsetattr(stdin.handle, .FLUSH, &original);
 }
 
 /// Get key input and return instruction.
 fn readKey(state_p: *State) !Key {
-    const stdin = io.getStdIn().reader();
     var buffer: [1]u8 = undefined;
     if (try stdin.read(&buffer) == 0) return @enumFromInt('\x00'); // no-op
 
@@ -175,7 +176,6 @@ fn readKey(state_p: *State) !Key {
         return .to_normal;
     }
 
-    // TODO: handle command mode modes
     if (state_p.mode == Mode.normal) {
         switch (buffer[0]) {
             'h' => return .left,
@@ -285,7 +285,7 @@ fn processKeypress(allocator: mem.Allocator, state_p: *State) !bool {
             switch (c) {
                 // TODO: change this once we have commands
                 'q' & 0x1f => { // ctrl + q
-                    _ = try io.getStdOut().write("\x1b[2J\x1b[H");
+                    _ = try stdout.write("\x1b[2J\x1b[H");
                     return true;
                 },
                 'h' & 0x1f, 'l' & 0x1f, '\r' => {
@@ -374,6 +374,9 @@ fn insertChar(allocator: mem.Allocator, state_p: *State, char: u8) !void {
     try rowInsertChar(allocator, &state_p.rows.items[state_p.cpos.y], state_p.cpos.x, char);
     state_p.cpos.x += 1;
 }
+
+/// Convert rows to a single string.
+// fn rowsToString() !void {}
 
 /// Open editor and load lines from provided file.
 fn openEditor(allocator: mem.Allocator, state_p: *State, path: [:0]const u8) !void {
@@ -531,7 +534,6 @@ fn drawMsgBar(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
 
 /// Refresh screen and draw all regions.
 /// Allocates new append buffer each time.
-/// TODO: render cursor differently depending on editor mode.
 fn refreshScreen(allocator: mem.Allocator, state_p: *State) !void {
     scrollEditor(state_p);
 
@@ -560,7 +562,7 @@ fn refreshScreen(allocator: mem.Allocator, state_p: *State) !void {
     // (?25h) hide cursor
     try append_buffer.appendSlice("\x1b[?25h");
 
-    _ = try io.getStdOut().write(append_buffer.items);
+    _ = try stdout.write(append_buffer.items);
 }
 
 /// Set status message.
@@ -574,11 +576,9 @@ fn setStatusMsg(state_p: *State, comptime format: []const u8, args: anytype) !vo
 /// Get current cursor position.
 /// Used to determine window size using only escape sequences.
 fn getCursorPos() !Pos {
-    const stdin = io.getStdIn().reader();
-
     // retrieve cursor location
     // buffer becomes \x1b[XXX;YYYR.. so we need to parse
-    _ = try io.getStdOut().write("\x1b[6n");
+    _ = try stdout.write("\x1b[6n");
 
     var buffer: [32]u8 = undefined;
     var i: u8 = 0;
@@ -604,9 +604,9 @@ fn getCursorPos() !Pos {
 fn getWindowSize() !Pos {
     var window_size: posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
 
-    if (linux.ioctl(io.getStdOut().handle, posix.T.IOCGWINSZ, @intFromPtr(&window_size)) != 0 or window_size.col == 0) {
+    if (linux.ioctl(stdout.handle, posix.T.IOCGWINSZ, @intFromPtr(&window_size)) != 0 or window_size.col == 0) {
         // move cursor to bottom right
-        _ = try io.getStdOut().write("\x1b[999C\x1b[999B");
+        _ = try stdout.write("\x1b[999C\x1b[999B");
         return try getCursorPos();
     }
 
