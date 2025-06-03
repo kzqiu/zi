@@ -281,7 +281,8 @@ fn processKeypress(alloc: mem.Allocator, state_p: *State) !bool {
             while (count > 0) : (count -= 1) moveCursor(state_p, dir);
         },
         .del, .backspace => {
-            // TODO: implement
+            if (k == .del) moveCursor(state_p, .right);
+            try deleteChar(alloc, state_p);
         },
         .to_normal, .to_insert => try changeMode(state_p, k),
         _ => {
@@ -301,13 +302,12 @@ fn processKeypress(alloc: mem.Allocator, state_p: *State) !bool {
                     _ = try stdout.write("\x1b[2J\x1b[H");
                     return true;
                 },
-                'h' & 0x1f, 'l' & 0x1f, '\r' => {
-                    // TODO: implement
-                },
+                'h' & 0x1f => try deleteChar(alloc, state_p),
+                '\r' => try insertNewLine(alloc, state_p),
                 's' & 0x1f => {
                     try saveEditor(alloc, state_p);
                 },
-                '\x00' => {
+                '\x00', 'l' & 0x1f => {
                     return false;
                 }, // no-op
                 else => if (state_p.mode == Mode.insert) {
@@ -364,8 +364,10 @@ fn renderRow(alloc: mem.Allocator, row_p: *Row) !void {
     row_p.render = new_render;
 }
 
-/// Append a row to end of file buffer.
-fn appendRow(alloc: mem.Allocator, state_p: *State, line: []const u8) !void {
+/// Insert a row into file buffer.
+fn insertRow(alloc: mem.Allocator, state_p: *State, idx: usize, line: []const u8) !void {
+    if (idx < 0 or idx > state_p.nrows) return;
+
     var new_row = Row{
         .chars = std.ArrayList(u8).init(alloc),
         .render = null,
@@ -373,9 +375,21 @@ fn appendRow(alloc: mem.Allocator, state_p: *State, line: []const u8) !void {
 
     try new_row.chars.appendSlice(line);
     try renderRow(alloc, &new_row);
-    try state_p.rows.append(new_row);
+    try state_p.rows.insert(idx, new_row);
 
     state_p.nrows += 1;
+    state_p.dirty += 1;
+}
+
+/// Delete row from file buffer.
+fn deleteRow(state_p: *State, idx: usize) !void {
+    if (idx < 0 or idx >= state_p.nrows) return;
+    state_p.rows.items[idx].chars.deinit();
+    if (state_p.rows.items[idx].render) |render| render.deinit();
+
+    _ = state_p.rows.orderedRemove(idx);
+
+    state_p.nrows -= 1;
     state_p.dirty += 1;
 }
 
@@ -387,13 +401,62 @@ fn rowInsertChar(alloc: mem.Allocator, state_p: *State, row_p: *Row, idx: usize,
     state_p.dirty += 1;
 }
 
+/// Append string to end of given row.
+/// Used mostly when creating new/deleting row.
+fn rowAppendString(alloc: mem.Allocator, state_p: *State, row_p: *Row, s: []const u8) !void {
+    try row_p.chars.appendSlice(s);
+    try renderRow(alloc, row_p);
+    state_p.dirty += 1;
+}
+
 /// Insert character.
 fn insertChar(alloc: mem.Allocator, state_p: *State, char: u8) !void {
     // TODO: current behavior when inserting at end is to continue trying to insert char
     // may want to have user create new line and then start inserting as separate chars
-    if (state_p.cpos.y == state_p.nrows) try appendRow(alloc, state_p, "");
+    if (state_p.cpos.y == state_p.nrows) try insertRow(alloc, state_p, 0, "");
     try rowInsertChar(alloc, state_p, &state_p.rows.items[state_p.cpos.y], state_p.cpos.x, char);
     state_p.cpos.x += 1;
+}
+
+/// Inserts new line into file buffer.
+/// If performed in middle of line, it will carry over content.
+fn insertNewLine(alloc: mem.Allocator, state_p: *State) !void {
+    if (state_p.cpos.x == 0) {
+        try insertRow(alloc, state_p, state_p.cpos.y, "");
+    } else {
+        const row_p = &state_p.rows.items[state_p.cpos.y];
+        try insertRow(alloc, state_p, state_p.cpos.y + 1, row_p.chars.items[state_p.cpos.x..]);
+        row_p.chars.shrinkRetainingCapacity(state_p.cpos.x);
+        try renderRow(alloc, row_p);
+    }
+
+    state_p.cpos.y += 1;
+    state_p.cpos.x = 0;
+}
+
+/// Delete character in specific row.
+fn rowDeleteChar(alloc: mem.Allocator, state_p: *State, row_p: *Row, idx: usize) !void {
+    if (idx < 0 or idx >= row_p.chars.items.len) return;
+    _ = row_p.chars.orderedRemove(idx);
+    try renderRow(alloc, row_p);
+    state_p.dirty += 1;
+}
+
+/// Delete character.
+fn deleteChar(alloc: mem.Allocator, state_p: *State) !void {
+    const cx = state_p.cpos.x;
+    const cy = state_p.cpos.y;
+    if (cy == state_p.nrows or cx == 0 and cy == 0) return;
+
+    if (cx > 0) {
+        try rowDeleteChar(alloc, state_p, &state_p.rows.items[cy], cx - 1);
+        state_p.cpos.x -= 1;
+    } else {
+        state_p.cpos.x = @intCast(state_p.rows.items[cy - 1].chars.items.len);
+        try rowAppendString(alloc, state_p, &state_p.rows.items[cy - 1], state_p.rows.items[cy].chars.items);
+        try deleteRow(state_p, cy);
+        state_p.cpos.y -= 1;
+    }
 }
 
 /// Convert rows to a single string.
@@ -432,7 +495,7 @@ fn openEditor(alloc: mem.Allocator, state_p: *State, path: [:0]const u8) !void {
 
     while (stream.streamUntilDelimiter(writer, '\n', null)) {
         defer line.clearRetainingCapacity();
-        try appendRow(alloc, state_p, mem.trim(u8, line.items, "\r\n"));
+        try insertRow(alloc, state_p, state_p.nrows, mem.trim(u8, line.items, "\r\n"));
     } else |err| switch (err) {
         error.EndOfStream => {}, // do nothing
         else => return err,
