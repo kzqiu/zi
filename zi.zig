@@ -439,6 +439,7 @@ fn saveEditor(alloc: mem.Allocator, state_p: *State) !void {
     defer f.close();
 
     try f.writeAll(buf);
+    try setStatusMsg(state_p, "{d} bytes written to disk", .{buf.len});
 }
 
 /// Scroll editor window to cursor location.
