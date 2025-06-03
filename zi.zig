@@ -295,6 +295,9 @@ fn processKeypress(alloc: mem.Allocator, state_p: *State) !bool {
                 'h' & 0x1f, 'l' & 0x1f, '\r' => {
                     // TODO: implement
                 },
+                's' & 0x1f => {
+                    try saveEditor(alloc, state_p);
+                },
                 '\x00' => {}, // no-op
                 else => if (state_p.mode == Mode.insert) {
                     const char: u8 = @intCast(c);
@@ -380,11 +383,24 @@ fn insertChar(alloc: mem.Allocator, state_p: *State, char: u8) !void {
 }
 
 /// Convert rows to a single string.
-// fn rowsToString(state_p: *State) !void {
-//     var total_len: usize = 0;
+/// SAFETY: Make sure to free buffer after using the buffer in caller!
+fn rowsToString(alloc: mem.Allocator, state_p: *State) ![]u8 {
+    // first get size of buffer to allocate
+    var total_len: usize = 0;
+    for (state_p.rows.items) |r| total_len += r.chars.items.len + 1;
+    const buf = try alloc.alloc(u8, total_len);
 
-//     for (state_p.rows.items) |r| total_len += r.chars.len;
-// }
+    // now copy the memory from the rows to the buffer
+    var pos: usize = 0;
+    for (state_p.rows.items) |r| {
+        const len: usize = r.chars.items.len;
+        @memcpy(buf[pos .. pos + len], r.chars.items);
+        buf[pos + len] = '\n';
+        pos += len + 1;
+    }
+
+    return buf;
+}
 
 /// Open editor and load lines from provided file.
 fn openEditor(alloc: mem.Allocator, state_p: *State, path: [:0]const u8) !void {
@@ -395,9 +411,34 @@ fn openEditor(alloc: mem.Allocator, state_p: *State, path: [:0]const u8) !void {
     var reader = std.io.bufferedReader(file.reader());
     var stream = reader.reader();
 
-    while (try stream.readUntilDelimiterOrEofAlloc(alloc, '\n', 1024)) |line| {
-        try appendRow(alloc, state_p, mem.trim(u8, line, "\r\n"));
+    // temporary line buffer
+    var line = std.ArrayList(u8).init(alloc);
+    defer line.deinit();
+    const writer = line.writer();
+
+    while (stream.streamUntilDelimiter(writer, '\n', null)) {
+        defer line.clearRetainingCapacity();
+        try appendRow(alloc, state_p, mem.trim(u8, line.items, "\r\n"));
+    } else |err| switch (err) {
+        error.EndOfStream => {}, // do nothing
+        else => return err,
     }
+}
+
+/// Save changes from file buffer to file.
+fn saveEditor(alloc: mem.Allocator, state_p: *State) !void {
+    if (state_p.filename.items.len == 0) return;
+
+    const buf = try rowsToString(alloc, state_p);
+    defer alloc.free(buf);
+
+    const f = try fs.cwd().createFile(
+        state_p.filename.items,
+        .{ .truncate = true, .mode = 0o666 },
+    );
+    defer f.close();
+
+    try f.writeAll(buf);
 }
 
 /// Scroll editor window to cursor location.
@@ -624,6 +665,7 @@ fn getWindowSize() !Pos {
 /// Entry point to program.
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
     // set up tui by changing terminal to raw mode
