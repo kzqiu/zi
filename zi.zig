@@ -13,7 +13,8 @@ const posix = std.posix;
 
 /// Editor Constants.
 const kilo_version = "0.0.1";
-const tab_stop = 8;
+const kilo_tab_stop = 8;
+const kilo_quit_times = 2;
 
 /// Global IO descriptors.
 const stdout = io.getStdOut();
@@ -66,6 +67,8 @@ const State = struct {
     status_len: u32 = 0,
     status_time: i64 = 0,
     mode: Mode = .normal,
+    dirty: u16 = 0,
+    quit_count: u16 = kilo_quit_times,
 
     /// Set up state by getting window dims and initing text buffers.
     fn init(alloc: mem.Allocator) !State {
@@ -289,6 +292,12 @@ fn processKeypress(alloc: mem.Allocator, state_p: *State) !bool {
             switch (c) {
                 // TODO: change this once we have commands
                 'q' & 0x1f => { // ctrl + q
+                    if (state_p.dirty != 0 and state_p.quit_count > 0) {
+                        try setStatusMsg(state_p, "File has unsaved changes. Press Ctrl-Q {d} more times to quit.", .{state_p.quit_count});
+                        state_p.quit_count -= 1;
+                        return false;
+                    }
+
                     _ = try stdout.write("\x1b[2J\x1b[H");
                     return true;
                 },
@@ -298,7 +307,9 @@ fn processKeypress(alloc: mem.Allocator, state_p: *State) !bool {
                 's' & 0x1f => {
                     try saveEditor(alloc, state_p);
                 },
-                '\x00' => {}, // no-op
+                '\x00' => {
+                    return false;
+                }, // no-op
                 else => if (state_p.mode == Mode.insert) {
                     const char: u8 = @intCast(c);
                     try insertChar(alloc, state_p, char);
@@ -307,6 +318,7 @@ fn processKeypress(alloc: mem.Allocator, state_p: *State) !bool {
         },
     }
 
+    state_p.quit_count = kilo_quit_times;
     return false;
 }
 
@@ -317,7 +329,7 @@ fn rowCurXtoRX(row_p: *Row, cx: u32) u32 {
 
     while (i < cx) : (i += 1) {
         if (row_p.chars.items[i] == '\t')
-            rx += tab_stop - 1 - rx % tab_stop;
+            rx += kilo_tab_stop - 1 - rx % kilo_tab_stop;
         rx += 1;
     }
 
@@ -341,7 +353,7 @@ fn renderRow(alloc: mem.Allocator, row_p: *Row) !void {
             try new_render.append(' ');
             render_idx += 1;
 
-            while (render_idx % tab_stop != 0) : (render_idx += 1)
+            while (render_idx % kilo_tab_stop != 0) : (render_idx += 1)
                 try new_render.append(' ');
         } else {
             try new_render.append(chars[char_idx]);
@@ -364,13 +376,15 @@ fn appendRow(alloc: mem.Allocator, state_p: *State, line: []const u8) !void {
     try state_p.rows.append(new_row);
 
     state_p.nrows += 1;
+    state_p.dirty += 1;
 }
 
 /// Insert character into a row at idx.
-fn rowInsertChar(alloc: mem.Allocator, row_p: *Row, idx: usize, char: u8) !void {
+fn rowInsertChar(alloc: mem.Allocator, state_p: *State, row_p: *Row, idx: usize, char: u8) !void {
     const at = if (idx < 0 or idx > row_p.chars.items.len) row_p.chars.items.len else idx;
     try row_p.chars.insert(at, char);
     try renderRow(alloc, row_p);
+    state_p.dirty += 1;
 }
 
 /// Insert character.
@@ -378,7 +392,7 @@ fn insertChar(alloc: mem.Allocator, state_p: *State, char: u8) !void {
     // TODO: current behavior when inserting at end is to continue trying to insert char
     // may want to have user create new line and then start inserting as separate chars
     if (state_p.cpos.y == state_p.nrows) try appendRow(alloc, state_p, "");
-    try rowInsertChar(alloc, &state_p.rows.items[state_p.cpos.y], state_p.cpos.x, char);
+    try rowInsertChar(alloc, state_p, &state_p.rows.items[state_p.cpos.y], state_p.cpos.x, char);
     state_p.cpos.x += 1;
 }
 
@@ -423,6 +437,8 @@ fn openEditor(alloc: mem.Allocator, state_p: *State, path: [:0]const u8) !void {
         error.EndOfStream => {}, // do nothing
         else => return err,
     }
+
+    state_p.dirty = 0;
 }
 
 /// Save changes from file buffer to file.
@@ -439,6 +455,7 @@ fn saveEditor(alloc: mem.Allocator, state_p: *State) !void {
     defer f.close();
 
     try f.writeAll(buf);
+    state_p.dirty = 0;
     try setStatusMsg(state_p, "{d} bytes written to disk", .{buf.len});
 }
 
@@ -533,7 +550,10 @@ fn drawStatus(state_p: *State, append_buffer: *std.ArrayList(u8)) !void {
     else
         state_p.filename.items;
 
-    const name_s = try fmt.bufPrint(&status, "{s}", .{name});
+    const name_s = if (state_p.dirty == 0)
+        try fmt.bufPrint(&status, "{s}", .{name})
+    else
+        try fmt.bufPrint(&status, "{s} (modified)", .{name});
     const row_s = try fmt.bufPrint(
         &rstatus,
         " {d}/{d} ",
@@ -685,7 +705,7 @@ pub fn main() !void {
     }
 
     // initial message
-    try setStatusMsg(&state, "HELP: Ctrl-Q = quit", .{});
+    try setStatusMsg(&state, "HELP: Ctrl-Q = quit | Ctrl-S = save", .{});
 
     // render/action loop
     while (true) {
